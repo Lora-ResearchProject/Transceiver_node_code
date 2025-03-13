@@ -1,66 +1,95 @@
-#include <SPI.h>
 #include <LoRa.h>
+#include <SPI.h>
 
-#define SS    18
-#define RST   14
-#define DIO0  26
-
-String mode = "receive";
+#define ss 5    // Pin connected to LoRa module's NSS (CS)
+#define rst 14  // Pin connected to LoRa module's RESET
+#define dio0 2  // Pin connected to LoRa module's DIO0
 
 void setup() {
   Serial.begin(9600);
   while (!Serial);
 
-  Serial.println("LoRa Initialized with Mode Control");
+  Serial.println("LoRa Receiver Initializing...");
 
-  LoRa.setPins(SS, RST, DIO0);
+  LoRa.setPins(ss, rst, dio0);
 
-  if (!LoRa.begin(433.775E6)) {
-    Serial.println("Starting LoRa failed!");
-    while (1);
+  // Initialize LoRa at 433 MHz
+  if (!LoRa.begin(433E6)) {
+    Serial.println("LoRa Initialization Failed!");
+    while (true);
   }
 
- 
-  LoRa.setSpreadingFactor(12);
-  LoRa.setSignalBandwidth(125E3);
-  LoRa.setSyncWord(0x34);  
-
-  Serial.println("LoRa Initialized. Default Mode: Receive");
-  Serial.println("Enter 't' for transmit mode or 'r' for receive mode.");
+  Serial.println("LoRa Initialized. Ready to receive messages!");
 }
 
 void loop() {
-  if (Serial.available() > 0) {
-    char command = Serial.read();
-    if (command == 't') {
-      mode = "transmit";
-      Serial.println("Switched to Transmit Mode");
-    } else if (command == 'r') {
-      mode = "receive";
-      Serial.println("Switched to Receive Mode");
+  // Check for incoming LoRa packets
+  int packetSize = LoRa.parsePacket();
+  if (packetSize) {
+    // Read the incoming packet
+    String receivedMessage = "";
+    while (LoRa.available()) {
+      receivedMessage += (char)LoRa.read();
     }
+
+    Serial.println("Message Received:");
+    Serial.println(receivedMessage);
+
+    // Process the received message
+    processMessage(receivedMessage);
   }
+}
 
-  if (mode == "receive") {
-    int packetSize = LoRa.parsePacket();
-    if (packetSize) {
-      Serial.print("Received packet: ");
+void processMessage(String message) {
+  // Split the payload based on type
+  int pipePos = message.indexOf('|');
+  if (pipePos != -1) {
+    String type = message.substring(0, pipePos);
 
-      while (LoRa.available()) {
-        String incoming = LoRa.readString();
-        Serial.print(incoming);
-      }
-
-      Serial.print(" with RSSI: ");
-      Serial.println(LoRa.packetRssi());
+    if (type == "003") {
+      handleChatData(message);
+    } else if (type == "128") {
+      handleGpsData(message);
+    } else {
+      Serial.println("Unknown data type");
     }
-  } else if (mode == "transmit") {
-    String message = "Hello from transmitter";
-    LoRa.beginPacket();
-    LoRa.print(message);
-    LoRa.endPacket();
-    Serial.println("Message sent: " + message);
-
-    delay(2000);
+  } else {
+    Serial.println("Malformed payload");
   }
+}
+
+void handleChatData(String data) {
+  // Example data: "003|UVckeFY|5"
+  int firstPipe = data.indexOf('|');
+  int secondPipe = data.indexOf('|', firstPipe + 1);
+
+  String id = data.substring(0, firstPipe);
+  String user = data.substring(firstPipe + 1, secondPipe);
+  String message = data.substring(secondPipe + 1);
+
+  Serial.println("Chat Data Received:");
+  Serial.println("ID: " + id);
+  Serial.println("User: " + user);
+  Serial.println("Message: " + message);
+}
+
+void handleGpsData(String data) {
+  // Example data: "128|0000|80.12321|13.32432|1"
+  int firstPipe = data.indexOf('|');
+  int secondPipe = data.indexOf('|', firstPipe + 1);
+  int thirdPipe = data.indexOf('|', secondPipe + 1);
+  int fourthPipe = data.indexOf('|', thirdPipe + 1);
+
+  String id = data.substring(0, firstPipe);
+  String device = data.substring(firstPipe + 1, secondPipe);
+  String latitude = data.substring(secondPipe + 1, thirdPipe);
+  String longitude = data.substring(thirdPipe + 1, fourthPipe);
+  String status = data.substring(fourthPipe + 1);
+
+  Serial.println("GPS Data Received:");
+  Serial.println("ID: " + id);
+  Serial.println("Device: " + device);
+  Serial.println("Latitude: " + latitude);
+  Serial.println("Longitude: " + longitude);
+  Serial.println("Status: " + status);
 }
