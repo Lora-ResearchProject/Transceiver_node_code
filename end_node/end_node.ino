@@ -6,12 +6,15 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <ArduinoJson.h>
+#include <cppQueue.h>
 
 // Pin definitions
 #define ss 5    // Pin connected to LoRa module's NSS (CS)
 #define rst 14  // Pin connected to LoRa module's RESET
 #define dio0 2  // Pin connected to LoRa module's DIO0
 #define MAX_PACKETS 20
+#define QUEUE_SIZE 10
+#define IMPLEMENTATION FIFO
 
 //BLE configurations
 #define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
@@ -22,7 +25,15 @@
 
 int receivedCount = 0;
 int sosPacketIndex = 0;
+bool sendLoRaGPSMessageFlag = false;
+bool sendLoRaSOSMessageFlag = false;
+bool sendWeatherRequestFlag = false;
+String loraGPSBuffer = "";
+String loraSOSBuffer = "";
 
+cppQueue chatQueue(sizeof(String), QUEUE_SIZE, IMPLEMENTATION);
+String weatherData = "";
+String weatherRequestData = "";
 String sosAlerts[MAX_PACKETS];
 
 
@@ -42,33 +53,38 @@ void setup() {
   Serial.println("LoRa Tranceiver Initializing...");
   LoRa.setPins(ss, rst, dio0);
 
-  // Initialize LoRa at 433 MHz (433000000 Hz)
   if (!LoRa.begin(433E6)) {
     Serial.println("LoRa Initialization Failed!");
     while (true);
   }
 
-  // Configure LoRa parameters
   LoRa.setSpreadingFactor(12);     
   LoRa.setSignalBandwidth(125E3);   
   LoRa.setCodingRate4(5);           
   LoRa.setSyncWord(0x12);            
   LoRa.enableCrc();                
+  LoRa.receive();
 
   Serial.println("LoRa Initialized...");
-  //Listen on LoRa
-  LoRa.receive();
-  //Initialize the BLE connection
+
   initializeBLE();
 }
 
 void loop() {
-  static int sendCount = 0;
+
   receiveAndProcessLoRaPacket();
 
-  if (sendCount < 5) {
-    sendMessage("145|0000|80.12321|13.32432|1");
-    delay(2000);
+  if (sendLoRaGPSMessageFlag) {
+    sendMessage(loraGPSBuffer);
+    sendLoRaGPSMessageFlag = false; 
+  }
+  if (sendLoRaSOSMessageFlag) {
+    sendMessage(loraSOSBuffer);
+    sendLoRaSOSMessageFlag = false;
+  }
+  if(sendWeatherRequestFlag) {
+    sendMessage(weatherRequestData);
+    sendWeatherRequestFlag = false;
   }
 }
 
@@ -78,34 +94,27 @@ void loop() {
 void receiveAndProcessLoRaPacket() {
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
-    // Received a packet
     Serial.print("Received packet: ");
     String encodedData;
 
-    // Read packet
     while (LoRa.available()) {
       encodedData += (char)LoRa.read();
     }
 
     receivedCount++;
 
+    //Received Packets are in Base 64
     String decodedData = decodeBase64(encodedData);
-    String jsonSOS = convertSOSToJSON(decodedData);
-    
-    // Caching
-    sosAlerts[sosPacketIndex] = jsonSOS;
-    sosPacketIndex = (sosPacketIndex + 1) % MAX_PACKETS;
+    Serial.println(decodedData);
+
+    String jsonData = convertStringToJSONString(decodedData);
+    Serial.print(jsonData);
 
     // Print Received data RSSI (signal strength)
-    Serial.println(encodedData);
-    Serial.println(decodedData);
-    Serial.println(jsonSOS);
+    // Serial.println(jsonSOS);
     Serial.print(" with RSSI ");
     Serial.println(LoRa.packetRssi());
     
-    if (receivedCount % 3 == 0) {
-      printStoredPackets();
-    }
   }
 }
 
@@ -130,39 +139,44 @@ String decodeBase64(const String& encodedData) {
   return String((char*)decodedData);
 }
 
-void printStoredPackets() {
-  Serial.println("Stored SOS Alerts:");
-  for (int i = 0; i < MAX_PACKETS; i++) {
-    if (sosAlerts[i].length() > 0) {
-      Serial.println(sosAlerts[i]);
-    }
-  }
-}
-/**
- * Converts an SOS alert string into a JSON-formatted string.
-  * @param input The input SOS alert string with values separated by '|'.
- * @return A JSON-formatted string representing the SOS alert.
- */
-String convertSOSToJSON(const String& input) {
-  //Splitting the input to the needed parts
-  int firstDelim = input.indexOf('|');
-  int secondDelim = input.indexOf('|', firstDelim + 1);
-  int thirdDelim = input.indexOf('|', secondDelim + 1);
-  int fourthDelim = input.indexOf('|', thirdDelim + 1);
-
-  // Extract each component based on split components
-  String id = input.substring(0, secondDelim);
-  String latitude = input.substring(secondDelim + 1, thirdDelim);
-  String longitude = input.substring(thirdDelim + 1, fourthDelim);
-  String status = input.substring(fourthDelim + 1);
-
-  // Format the JSON string
-  String json = "{\"id\":\"" + id + "\",\"l\":\"" + latitude + "-" + longitude + "\",\"s\":" + status + "}";
-
-  return json;
-}
-
 String convertJSONToGPSFormattedString(const String& jsonString) {
+    StaticJsonDocument<200> doc;  // Create a JSON document
+
+    // Parse JSON string
+    DeserializationError error = deserializeJson(doc, jsonString);
+    if (error) {
+        Serial.print("JSON Parsing Failed: ");
+        Serial.println(error.c_str());
+        return "";  
+    }
+
+    String id = doc["id"].as<String>();       
+    String location = doc["l"].as<String>();  
+    String status = doc["s"].as<String>();         
+
+    // Split location into latitude and longitude
+    int separatorIndex = location.indexOf('|');
+    if (separatorIndex == -1) {
+        Serial.println("Invalid location format");
+        return "";  
+    }
+
+    String latitude = location.substring(0, separatorIndex);
+    String longitude = location.substring(separatorIndex + 1);
+
+    String formattedData = id + "|0000|" + latitude + "|" + longitude + "|" + status;
+    Serial.print("Formatted Data: ");
+    Serial.println(formattedData); 
+    return formattedData;
+}
+
+/**
+ * Converts a JSON object to a formatted string.
+ *
+ * @param jsonString The JSON string to be converted.
+ * @return A formatted string in the format: "w|id|latitude|longitude|wr"
+ */
+String convertJSONToWeatherFormattedString(const String& jsonString) {
     StaticJsonDocument<200> doc;  // Create a JSON document
 
     // Parse JSON string
@@ -173,10 +187,10 @@ String convertJSONToGPSFormattedString(const String& jsonString) {
         return "";  // Return empty string on failure
     }
 
-    // Extract values
-    String id = doc["id"].as<String>();       // Extract ID
-    String location = doc["l"].as<String>();  // "7.05008|79.91997"
-    int status = doc["s"].as<int>();          // Extract status (0 or 1)
+    // Extract values from JSON
+    String id = doc["id"].as<String>();       
+    String location = doc["l"].as<String>();  
+    String wr = String(doc["wr"].as<int>());  // Convert `wr` to string
 
     // Split location into latitude and longitude
     int separatorIndex = location.indexOf('|');
@@ -188,14 +202,66 @@ String convertJSONToGPSFormattedString(const String& jsonString) {
     String latitude = location.substring(0, separatorIndex);
     String longitude = location.substring(separatorIndex + 1);
 
-    // Generate the formatted string with ID
-    String formattedData = id + "|0000|" + latitude + "|" + longitude + "|" + "0";
-    Serial.print("Formatted Data Length: ");
-    Serial.println(formattedData.length());  // Should be > 0 if valid
+    // Construct the formatted string
+    String formattedData = "w|" + id + "|" + latitude + "|" + longitude + "|" + wr;
+    
+    // Debug Output
     Serial.print("Formatted Data: ");
-    Serial.println(formattedData);  // Print the actual string
+    Serial.println(formattedData);  
+
     return formattedData;
 }
+
+/**
+ * Function to process incoming data, convert it to JSON, and update respective queues.
+ *
+ * @param input The received string in the format "w|005|Uf6rVNA|100" or "c|005|Uf6rVNA|100".
+ * @return A JSON-formatted string.
+ */
+String convertStringToJSONString(const String &input) {
+
+  int firstDelim = input.indexOf('|');
+  int secondDelim = input.indexOf('|', firstDelim + 1);
+  int thirdDelim = input.indexOf('|', secondDelim + 1);
+
+  if (firstDelim == -1 || secondDelim == -1 || thirdDelim == -1) {
+    Serial.println("Invalid data format received.");
+    return "";
+  }
+
+  String type = input.substring(0, firstDelim);
+  String id = input.substring(firstDelim + 1, secondDelim) + "|" + input.substring(secondDelim + 1, thirdDelim);
+  int value = input.substring(thirdDelim + 1).toInt(); 
+
+  StaticJsonDocument<200> jsonDoc;
+  jsonDoc["id"] = id;
+
+  if (type == "w") {
+    jsonDoc["w"] = value;  // Weather Data
+  } else if (type == "c") {
+    jsonDoc["m"] = value;  // Chat Data
+  } else {
+    Serial.println("Unknown data type received.");
+    return "";
+  }
+
+
+  String jsonString;
+  serializeJson(jsonDoc, jsonString);
+
+  if (type == "w") {
+    weatherData = jsonString;
+  } else if (type == "c") {
+    if (chatQueue.isFull()) chatQueue.pop(nullptr);
+      chatQueue.push(&jsonString);
+  }
+
+  Serial.print("Weather Data:");
+  Serial.println(weatherData);
+
+  return jsonString;
+}
+
 
 /**
  * Converts an SOS alert string into a JSON-formatted string.
@@ -228,6 +294,7 @@ class GPSCharacteristicCallback : public BLECharacteristicCallbacks {
 
    void onWrite(BLECharacteristic *pCharacteristic) override {
     String receivedData = pCharacteristic->getValue();
+    String formattedString = "";
 
     if (receivedData.length() > 0) {
       dataBuffer += receivedData;
@@ -237,10 +304,12 @@ class GPSCharacteristicCallback : public BLECharacteristicCallbacks {
         Serial.print("✅ GPS Data received: ");
         Serial.println(dataBuffer);
 
-        String formattedString = convertJSONToGPSFormattedString(dataBuffer);
+        formattedString = convertJSONToGPSFormattedString(dataBuffer);
         Serial.print("📌 Formatted Output: ");
         Serial.println(formattedString);
         
+        loraGPSBuffer = formattedString;
+        sendLoRaGPSMessageFlag = true;
 
         dataBuffer = "";
       }
@@ -250,11 +319,28 @@ class GPSCharacteristicCallback : public BLECharacteristicCallbacks {
 
 // Callbacks for SOS characteristic
 class SOSCharacteristicCallback : public BLECharacteristicCallbacks {
+  String sosBuffer = "";
   void onWrite(BLECharacteristic *pCharacteristic) override {
-    String value = pCharacteristic->getValue();
-    if (value.length() > 0) {
-      Serial.print("🚨 SOS Received: ");
-      Serial.println(value);
+    String receivedData = pCharacteristic->getValue();
+    String formattedString = "";
+
+    if (receivedData.length() > 0) {
+      sosBuffer += receivedData;
+      lastReceivedTime = millis();
+
+      if (receivedData.endsWith("}")) {
+        Serial.print("🚨 SOS Received: ");
+        Serial.println(sosBuffer);
+
+        formattedString = convertJSONToGPSFormattedString(sosBuffer);
+        Serial.print("📌 Formatted Output: ");
+        Serial.println(formattedString);
+        
+        loraSOSBuffer = formattedString;
+        sendLoRaSOSMessageFlag = true;
+
+        sosBuffer = "";
+      }
     }
   }
 
@@ -298,10 +384,22 @@ class ChatCharacteristicCallback : public BLECharacteristicCallbacks {
 // Callbacks for Weather characteristic
 class WeatherCharacteristicCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
-    String value = pCharacteristic->getValue();
-    if (value.length() > 0) {
-      Serial.print("Weather Data received from Mobile App: ");
-      Serial.println(value);
+    String weatherRequest = pCharacteristic->getValue();
+    
+    if (weatherRequest.length() > 0) {
+      Serial.print("🌦️ Weather Request received: ");
+      Serial.println(weatherRequest);
+
+      weatherRequestData = convertJSONToWeatherFormattedString(weatherRequest);
+      sendWeatherRequestFlag = true;
+    }
+  }
+
+  void onRead(BLECharacteristic *pCharacteristic) override {
+    if(weatherData) {
+      Serial.print("Writing Weather Data to Mobile: ");
+      Serial.println(weatherData);
+      pCharacteristic->setValue(weatherData.c_str());
     }
   }
 };
@@ -316,11 +414,11 @@ void initializeBLE() {
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  gpsCharacteristic = pService->createCharacteristic(
-    GPS_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
-  gpsCharacteristic->addDescriptor(new BLE2902());
-  gpsCharacteristic->setCallbacks(new GPSCharacteristicCallback());
+  // gpsCharacteristic = pService->createCharacteristic(
+  //   GPS_CHARACTERISTIC_UUID,
+  //   BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+  // gpsCharacteristic->addDescriptor(new BLE2902());
+  // gpsCharacteristic->setCallbacks(new GPSCharacteristicCallback());
 
   sosCharacteristic = pService->createCharacteristic(
     SOS_CHARACTERISTIC_UUID,
