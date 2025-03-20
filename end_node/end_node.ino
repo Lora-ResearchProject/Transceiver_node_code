@@ -22,18 +22,28 @@
 #define SOS_CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef654321"
 #define CHAT_CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef987654"
 #define WEATHER_CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef111213"
+#define HOTSPOT_CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef111214"
+#define LINKING_CHARACTERISTIC_UUID "abcd1234-5678-1234-5678-abcdef111215"
 
 int receivedCount = 0;
 int sosPacketIndex = 0;
 bool sendLoRaGPSMessageFlag = false;
 bool sendLoRaSOSMessageFlag = false;
 bool sendWeatherRequestFlag = false;
+bool sendChatMessageFlag = false;
+bool sendHotspotRequestFlag = false;
+bool sendLinkingRequestFlag = false;
 String loraGPSBuffer = "";
 String loraSOSBuffer = "";
-
-cppQueue chatQueue(sizeof(String), QUEUE_SIZE, IMPLEMENTATION);
 String weatherData = "";
 String weatherRequestData = "";
+String loraChatBuffer = "";
+String loraHotspotBuffer = "";
+String hotspotRequestData = "";
+String linkingRequestData = "";
+
+cppQueue chatQueue(sizeof(String), QUEUE_SIZE, IMPLEMENTATION);
+cppQueue hotspotQueue(sizeof(char) * 256, QUEUE_SIZE, IMPLEMENTATION);
 String sosAlerts[MAX_PACKETS];
 
 
@@ -46,6 +56,8 @@ BLECharacteristic *gpsCharacteristic;
 BLECharacteristic *sosCharacteristic;
 BLECharacteristic *chatCharacteristic;
 BLECharacteristic *weatherCharacteristic;
+BLECharacteristic *hotspotCharacteristic;
+BLECharacteristic *linkingCharacteristic;
 
 void setup() {
   Serial.begin(9600);
@@ -86,6 +98,14 @@ void loop() {
     sendMessage(weatherRequestData);
     sendWeatherRequestFlag = false;
   }
+  if(sendHotspotRequestFlag) {
+    sendMessage(hotspotRequestData);
+    sendHotspotRequestFlag = false;
+  }
+  if(sendLinkingRequestFlag) {
+    sendMessage(linkingRequestData);
+    sendLinkingRequestFlag = false;
+  }
 }
 
 /**
@@ -110,8 +130,6 @@ void receiveAndProcessLoRaPacket() {
     String jsonData = convertStringToJSONString(decodedData);
     Serial.print(jsonData);
 
-    // Print Received data RSSI (signal strength)
-    // Serial.println(jsonSOS);
     Serial.print(" with RSSI ");
     Serial.println(LoRa.packetRssi());
     
@@ -139,7 +157,7 @@ String decodeBase64(const String& encodedData) {
   return String((char*)decodedData);
 }
 
-String convertJSONToGPSFormattedString(const String& jsonString) {
+String convertJSONToGPSFormattedString(const String& jsonString, const String& status) {
     StaticJsonDocument<200> doc;  // Create a JSON document
 
     // Parse JSON string
@@ -151,8 +169,7 @@ String convertJSONToGPSFormattedString(const String& jsonString) {
     }
 
     String id = doc["id"].as<String>();       
-    String location = doc["l"].as<String>();  
-    String status = doc["s"].as<String>();         
+    String location = doc["l"].as<String>();           
 
     // Split location into latitude and longitude
     int separatorIndex = location.indexOf('|');
@@ -164,7 +181,7 @@ String convertJSONToGPSFormattedString(const String& jsonString) {
     String latitude = location.substring(0, separatorIndex);
     String longitude = location.substring(separatorIndex + 1);
 
-    String formattedData = id + "|0000|" + latitude + "|" + longitude + "|" + status;
+    String formattedData = id + "|" + latitude + "|" + longitude + "|" + status;
     Serial.print("Formatted Data: ");
     Serial.println(formattedData); 
     return formattedData;
@@ -179,35 +196,65 @@ String convertJSONToGPSFormattedString(const String& jsonString) {
 String convertJSONToWeatherFormattedString(const String& jsonString) {
     StaticJsonDocument<200> doc;  // Create a JSON document
 
-    // Parse JSON string
     DeserializationError error = deserializeJson(doc, jsonString);
     if (error) {
         Serial.print("JSON Parsing Failed: ");
         Serial.println(error.c_str());
-        return "";  // Return empty string on failure
+        return "";  
     }
 
-    // Extract values from JSON
     String id = doc["id"].as<String>();       
     String location = doc["l"].as<String>();  
-    String wr = String(doc["wr"].as<int>());  // Convert `wr` to string
+    String wr = String(doc["wr"].as<int>());  
 
-    // Split location into latitude and longitude
     int separatorIndex = location.indexOf('|');
     if (separatorIndex == -1) {
         Serial.println("Invalid location format");
-        return "";  // Return empty string if format is incorrect
+        return "";  
     }
 
     String latitude = location.substring(0, separatorIndex);
     String longitude = location.substring(separatorIndex + 1);
 
-    // Construct the formatted string
+
     String formattedData = "w|" + id + "|" + latitude + "|" + longitude + "|" + wr;
     
-    // Debug Output
     Serial.print("Formatted Data: ");
     Serial.println(formattedData);  
+
+    return formattedData;
+}
+/**
+ * Converts a JSON object to a formatted string for hotspot request .
+ *
+ * @param jsonString The JSON string to be converted.
+ * @return A formatted string in the format: "h|latitude|longitude"
+ */
+String convertJSONtoHotspotFormattedString(const String& jsonString) {
+    StaticJsonDocument<200> doc; 
+
+
+    DeserializationError error = deserializeJson(doc, jsonString);
+    if (error) {
+        Serial.print("JSON Parsing Failed: ");
+        Serial.println(error.c_str());
+        return ""; 
+    }
+
+    if (!doc.containsKey("latitude") || !doc.containsKey("longitude")) {
+        Serial.println("Invalid JSON: Missing latitude or longitude");
+        return ""; 
+    }
+
+    float latitude = doc["latitude"].as<float>();   
+    float longitude = doc["longitude"].as<float>(); 
+
+    // Construct the formatted string in the format: "h|latitude|longitude"
+    String formattedData = "h|" + String(latitude, 6) + "|" + String(longitude, 6);
+
+    // Debug Output
+    Serial.print("Formatted Hotspot Data: ");
+    Serial.println(formattedData);
 
     return formattedData;
 }
@@ -219,6 +266,13 @@ String convertJSONToWeatherFormattedString(const String& jsonString) {
  * @return A JSON-formatted string.
  */
 String convertStringToJSONString(const String &input) {
+
+  String jsonString;
+
+  if (input.startsWith("h|")) {
+    jsonString = storeHotspotData(input);
+    return jsonString;
+  }
 
   int firstDelim = input.indexOf('|');
   int secondDelim = input.indexOf('|', firstDelim + 1);
@@ -237,16 +291,14 @@ String convertStringToJSONString(const String &input) {
   jsonDoc["id"] = id;
 
   if (type == "w") {
-    jsonDoc["w"] = value;  // Weather Data
+    jsonDoc["w"] = value;
   } else if (type == "c") {
-    jsonDoc["m"] = value;  // Chat Data
+    jsonDoc["m"] = value;
   } else {
     Serial.println("Unknown data type received.");
     return "";
   }
 
-
-  String jsonString;
   serializeJson(jsonDoc, jsonString);
 
   if (type == "w") {
@@ -262,6 +314,72 @@ String convertStringToJSONString(const String &input) {
   return jsonString;
 }
 
+String convertJSONToLinkingFormattedString(const String& jsonString) {
+  StaticJsonDocument<200> doc;
+
+  // Parse JSON
+  DeserializationError error = deserializeJson(doc, jsonString);
+  if (error) {
+    Serial.print("JSON Parsing Failed: ");
+    Serial.println(error.c_str());
+    return "";
+  }
+
+  String vesselId = doc["vessel_id"].as<String>();
+  int hotspotId = doc["hotspot_id"].as<int>();
+
+  // Format: l|<vessel_id>|<hotspot_id>
+  String formattedData = "l|" + vesselId + "|" + String(hotspotId);
+  
+  Serial.print("Formatted Linking Data: ");
+  Serial.println(formattedData);
+  
+  return formattedData;
+}
+
+
+/**
+ * Stores received LoRa messages in a queue as JSON objects.
+ *
+ * @param receivedData The LoRa message in the format: "h|hotspotId|latitude,longitude"
+ */
+String storeHotspotData(const String& receivedData) {
+    // Ensure the message starts with 'h|'
+    if (!receivedData.startsWith("h|")) {
+        Serial.println("❌ Invalid hotspot message format.");
+        return "";
+    }
+
+    Serial.print("Data received: ");
+    Serial.println(receivedData);
+
+    int firstDelim = receivedData.indexOf('|', 2);  // After "h|"
+    int secondDelim = receivedData.indexOf('|', firstDelim + 1);
+
+    if (firstDelim == -1 || secondDelim == -1) {
+        Serial.println("❌ Invalid data structure.");
+        return "";
+    }
+
+    // Extract values
+    String hotspotId = receivedData.substring(2, firstDelim);
+    String latitude = receivedData.substring(firstDelim + 1, secondDelim);
+    String longitude = receivedData.substring(secondDelim + 1); 
+
+    StaticJsonDocument<200> jsonDoc;
+    jsonDoc["hotspotId"] = hotspotId.toInt();
+    jsonDoc["latitude"] = latitude.toFloat();
+    jsonDoc["longitude"] = longitude.toFloat();
+
+    String jsonString;
+    serializeJson(jsonDoc, jsonString);
+
+    storeHotspotDataInQueue(jsonString);
+
+    Serial.println("✅ Hotspot data stored: " + jsonString);
+
+    return jsonString;  
+}
 
 /**
  * Converts an SOS alert string into a JSON-formatted string.
@@ -304,7 +422,7 @@ class GPSCharacteristicCallback : public BLECharacteristicCallbacks {
         Serial.print("✅ GPS Data received: ");
         Serial.println(dataBuffer);
 
-        formattedString = convertJSONToGPSFormattedString(dataBuffer);
+        formattedString = convertJSONToGPSFormattedString(dataBuffer, "0");
         Serial.print("📌 Formatted Output: ");
         Serial.println(formattedString);
         
@@ -332,7 +450,7 @@ class SOSCharacteristicCallback : public BLECharacteristicCallbacks {
         Serial.print("🚨 SOS Received: ");
         Serial.println(sosBuffer);
 
-        formattedString = convertJSONToGPSFormattedString(sosBuffer);
+        formattedString = convertJSONToGPSFormattedString(sosBuffer, "1");
         Serial.print("📌 Formatted Output: ");
         Serial.println(formattedString);
         
@@ -351,20 +469,18 @@ class SOSCharacteristicCallback : public BLECharacteristicCallbacks {
     String sosAlertsArray = "["; 
 
     for (int i = 0; i < MAX_PACKETS; i++) {
-        if (sosAlerts[i].length() > 0) { // Ensure the entry is not empty
-            if (sosAlertsArray.length() > 1) {  // If not the first item, add a comma separator
+        if (sosAlerts[i].length() > 0) { 
+            if (sosAlertsArray.length() > 1) {  
                 sosAlertsArray += ",";
             }
-            sosAlertsArray += sosAlerts[i];  // Append the JSON object
+            sosAlertsArray += sosAlerts[i]; 
         }
     }
 
-    sosAlertsArray += "]";  // Close the JSON array
+    sosAlertsArray += "]";  
 
-    // Set the formatted JSON array string as the characteristic value
     pCharacteristic->setValue(sosAlertsArray.c_str());
 
-    // Log the response being sent
     Serial.print("📤 SOS Alerts sent to mobile: ");
     Serial.println(sosAlertsArray);
   }
@@ -385,6 +501,8 @@ class ChatCharacteristicCallback : public BLECharacteristicCallbacks {
 class WeatherCharacteristicCallback : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
     String weatherRequest = pCharacteristic->getValue();
+    Serial.print("Weather Request");
+    Serial.println(weatherRequest);
     
     if (weatherRequest.length() > 0) {
       Serial.print("🌦️ Weather Request received: ");
@@ -396,13 +514,102 @@ class WeatherCharacteristicCallback : public BLECharacteristicCallbacks {
   }
 
   void onRead(BLECharacteristic *pCharacteristic) override {
-    if(weatherData) {
+    if(weatherData.length() > 0) {
       Serial.print("Writing Weather Data to Mobile: ");
       Serial.println(weatherData);
       pCharacteristic->setValue(weatherData.c_str());
     }
   }
 };
+
+class HotspotCharacteristicCallback : public BLECharacteristicCallbacks {
+
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String hotSpotRequest = pCharacteristic->getValue();
+    
+    if (hotSpotRequest.length() > 0) {
+      Serial.print("🌦️ Weather Request received: ");
+      Serial.println(hotSpotRequest);
+
+      hotspotRequestData = convertJSONtoHotspotFormattedString(hotSpotRequest);
+      sendHotspotRequestFlag = true;
+    }
+  }
+
+  void onRead(BLECharacteristic *pCharacteristic) {
+    Serial.println("📩 Fetch Hotspot Data request received");
+
+    Serial.print("📦 Queue size before read: ");
+    Serial.println(hotspotQueue.getCount());
+
+    if (!hotspotQueue.isEmpty()) {
+        String allHotspotData = "[";  // Start JSON array
+
+        while (!hotspotQueue.isEmpty()) {
+            char hotspotDataBuffer[256];  // Fixed-size buffer
+            hotspotQueue.pop(&hotspotDataBuffer);  // Remove from queue
+
+            if (allHotspotData.length() > 1) {  // If not the first item, add comma separator
+                allHotspotData += ",";
+            }
+            allHotspotData += hotspotDataBuffer;  // Append JSON data
+        }
+
+        allHotspotData += "]";  // Close JSON array
+
+        Serial.println("📡 Hotspot Data Sent: " + allHotspotData);
+        pCharacteristic->setValue(allHotspotData.c_str());
+
+        Serial.print("📦 Queue size after read: ");
+        Serial.println(hotspotQueue.getCount());  // Should be 0
+    } else {
+        Serial.println("⚠️ No Hotspot Data Available!");
+        pCharacteristic->setValue("No Data Available");
+    }
+  }
+};
+
+class LinkingCharacteristicCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    String linkingData = pCharacteristic->getValue();
+    if (linkingData.length() > 0) {
+      Serial.print("🔗 Linking request received: ");
+      Serial.println(linkingData);
+
+      linkingRequestData = convertJSONToLinkingFormattedString(linkingData);
+      sendLinkingRequestFlag = true;
+
+      // Optionally forward over LoRa:
+      // sendMessage(formattedString);
+    }
+  }
+};
+
+/**
+ * Stores hotspot data in the queue safely.
+ * Converts `String` to `char[]` before storing.
+ */
+void storeHotspotDataInQueue(const String &newHotspotData) {
+    Serial.print("📥 Before storing, queue size: ");
+    Serial.println(hotspotQueue.getCount());
+
+    // Convert String to char array for stable memory management
+    char hotspotDataBuffer[256];  // Ensure enough buffer space
+    newHotspotData.toCharArray(hotspotDataBuffer, sizeof(hotspotDataBuffer));
+
+    if (hotspotQueue.isFull()) {
+        hotspotQueue.pop(nullptr);  // Remove oldest entry if full
+    }
+
+    hotspotQueue.push(&hotspotDataBuffer);
+
+    Serial.print("✅ Stored Hotspot Data in Queue: ");
+    Serial.println(hotspotDataBuffer);
+
+    Serial.print("📦 After storing, queue size: ");
+    Serial.println(hotspotQueue.getCount());
+}
+
 
 //Setup and intialize BLE characteristics
 void initializeBLE() {
@@ -434,9 +641,26 @@ void initializeBLE() {
 
   weatherCharacteristic = pService->createCharacteristic(
     WEATHER_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   weatherCharacteristic->addDescriptor(new BLE2902());
   weatherCharacteristic->setCallbacks(new WeatherCharacteristicCallback());
+
+  // Hotspot Characteristic (NEW)
+  hotspotCharacteristic = pService->createCharacteristic(
+    HOTSPOT_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  hotspotCharacteristic->addDescriptor(new BLE2902());
+  hotspotCharacteristic->setCallbacks(new HotspotCharacteristicCallback());
+  
+  //Linking Characteristic
+  linkingCharacteristic = pService->createCharacteristic(
+    LINKING_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  linkingCharacteristic->addDescriptor(new BLE2902());
+  linkingCharacteristic->setCallbacks(new LinkingCharacteristicCallback());
+
+  Serial.println("Characteristics initialized:");
 
   pService->start();
 
